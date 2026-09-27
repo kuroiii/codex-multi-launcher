@@ -1,51 +1,76 @@
-# MSIX identity launch (local experimental patch)
+# MSIX package-identity launch
 
-## Proven input vs. new implementation
+This document describes the compatibility launch path used by the `msix-identity-launch` branch.
 
-The user's 2026-09-27 Windows experiment on OpenAI.Codex 26.924.2738.0 produced fresh SQLite, config and Chromium files in separate test directories after temporary HKCU CODEX_HOME / CODEX_SQLITE_HOME changes, Environment broadcast, and IApplicationActivationManager activation with --user-data-dir.
+## Why this path exists
 
-That result is the basis for this patch. It is NOT a test of this implementation, concurrent instances, long-term isolation, automatic self-relaunch, all plugin behavior, or future application builds.
+Recent Windows Codex/ChatGPT Desktop builds can reject direct execution that does not retain the installed MSIX package identity. The compatibility branch therefore does **not** copy the Codex App runtime and does **not** directly start `ChatGPT.exe` as an unpackaged process.
+
+The implementation was validated on OpenAI.Codex `26.924.2738.0` (Windows x64). Future desktop builds may change these integration surfaces.
 
 ## Launch transaction
 
-Acquire the existing profile-operation gate, then the common per-user MSIX environment file lock. Recover a prior incomplete environment transaction before proceeding. Take raw registry snapshots, durably write the recovery journal, change only CODEX_HOME and CODEX_SQLITE_HOME, broadcast WM_SETTINGCHANGE, allow a propagation grace interval, and activate the registered package. No IPackageDebugSettings, runtime copy, direct executable fallback, --no-sandbox or singleton-disabling flag is used.
+For an isolated profile the launcher:
 
-A new launch must return a previously unseen PID. Verify the exact registered package full name with GetPackageFullName, read the process command line using WMI, and require the expected absolute --user-data-dir. Poll for new file metadata in BOTH the expected Codex Home and Electron profile. Existing files alone are insufficient. The nominal verification timeout is 45 seconds; native Windows calls and per-window broadcast timeouts can extend wall time.
+1. acquires the existing profile-operation lock and a separate per-user MSIX environment lock;
+2. recovers any compatible unfinished environment journal from an earlier abnormal termination;
+3. snapshots the raw HKCU `Environment` values and registry value kinds for `CODEX_HOME` and `CODEX_SQLITE_HOME`;
+4. durably writes a recovery journal;
+5. temporarily points those two user environment values at the selected profile's Codex Home and broadcasts `WM_SETTINGCHANGE`;
+6. activates the registered `OpenAI.Codex_2p2nqsd0c76g0!App` through `IApplicationActivationManager`, passing an absolute `--user-data-dir` for the profile's Electron data;
+7. requires a new PID and verifies the registered package identity, process command line, expected Electron directory, and fresh filesystem activity in both the Codex Home and Electron profile;
+8. restores the original registry values/value kinds, broadcasts the environment change again, and only then reports a successful launch.
 
-Restore the original raw registry values and value kinds (or remove values which were originally absent), broadcast again, and only then return a successful launch result. An in-memory snapshot supports ordinary exception cleanup; a disk journal supports recovery on the next launcher start after forced termination. This does not provide an immediate watchdog after a hard kill.
+No `IPackageDebugSettings`, runtime copy, direct-executable fallback, `--no-sandbox`, or singleton-disabling flag is used.
 
-The environment restore is compare-before-write. If the current value is neither the temporary value nor the saved original, preserve that external edit and retain the journal. This is intentionally a diagnostic stop, not an automatic registry overwrite.
+## Process ownership and recovery
+
+Managed process ownership is not inferred from the executable path alone. The launcher correlates PID, creation time, executable path, package identity and the command line's absolute `--user-data-dir`. A directory only maps to a managed profile when the profile registry and launcher marker agree.
+
+Unresolved Codex processes are handled conservatively and can block managed mutation/launch operations rather than being silently treated as the personal instance.
+
+The environment journal uses compare-before-write restoration. If a current user environment value is neither the temporary value nor the saved original value, the launcher preserves the external edit and retains the journal for diagnosis instead of overwriting it.
+
+A manual recovery helper is available at:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Restore-MsixEnvironment.ps1
+```
+
+Run it only after exiting the launcher.
 
 ## Important limitations
 
-1. This modifies per-user Windows environment, not just a child process. The lock coordinates copies of this patched launcher only. An unrelated Codex/CLI started while the transaction is active can inherit the temporary home. Do not launch from the taskbar, Start, another terminal or an older launcher during this interval. Other Windows sessions/cached environment consumers and application self-relaunch are not guaranteed isolated.
-2. File activity + PID/arguments/package checks are evidence of the selected local paths, not a complete audit of backend credentials, plugins, SQLite handles or every subprocess. Run the manual multi-account/concurrency acceptance test before real work. An independent existing daemon may write files; file metadata is not a process-attributed file-access trace.
-3. MSIX activation may reuse an existing application process. A new-profile request that returns an existing PID is rejected, not registered against the new profile. A deep link that returns a different PID is reported as unverified; the app may already have received the activation. This cannot undo an activation delivered by Windows.
-4. WMI-unreadable or custom unregistered desktop instances are classified as unresolved and block managed launches and mutations. Close the temporary CodexMultiIdentityTest* windows before using this patch. PID records are matched with process creation time and executable path; directory recovery requires the registry and profile marker to agree.
-5. Some global credential/endpoint overrides are rejected without logging their values, because MSIX does not inherit the old ProcessStartInfo.Environment scrub. The patch does not delete global API keys to work around this. Existing per-profile auth.json/config files remain untouched by the launch service.
-6. Focus does not relaunch a process if the window cannot be raised. Use its tray/taskbar entry after the environment transaction has ended. Runtime cache icon badges are not supported by this path.
-7. Successful startup is not a promise of future Codex compatibility. No arbitrary downgrade/reinstall or profile deletion is performed.
+- The temporary `CODEX_HOME` / `CODEX_SQLITE_HOME` change is a **user-level Windows environment transaction**, not a private child-process environment. The lock coordinates patched launcher instances only. Do not start Codex/Codex CLI from another launcher, Start, taskbar, or terminal while an isolated profile is in the activation phase.
+- File activity plus PID/arguments/package checks prove the selected local paths were used, but are not a complete audit of every plugin, credential store, daemon, or subprocess.
+- MSIX activation may route an activation request to an existing app process. A new isolated-profile launch that does not obtain a new verifiable PID is rejected rather than rebound.
+- WMI-unreadable or otherwise unresolved Codex processes are treated conservatively.
+- Some user/machine-level credential or endpoint overrides are rejected because the MSIX broker cannot reproduce the old per-child environment scrub safely.
+- The current MSIX path does not generate per-profile tray-icon badge variants because it does not modify/copy official application files.
+- Successful operation on one Codex version does not guarantee future compatibility.
 
-## Read-only state recovery
+## Validation status
 
-ProcessInventory keeps IsRuntimeCache as the legacy physical-path flag, and IsManaged also recognizes ProfileId obtained from an exact registered Electron directory. Empty ProfileId explicitly means unresolved. Unknown processes are never treated as definitely personal. The UI derives state but no longer saves its normalization during polling; actual mutations still hold the original operation gate.
+On 2026-09-27 the branch was validated on Windows x64 with OpenAI.Codex `26.924.2738.0`:
 
-## Tests and validation status
+- `dotnet restore CodexMultiLauncher.slnx` — passed;
+- Release build — passed;
+- xUnit suite — **61 passed, 0 failed, 0 skipped**;
+- personal profile launch — passed;
+- existing isolated profile launch — passed;
+- personal + isolated profile running concurrently — passed;
+- launcher restart / process re-identification — passed;
+- isolated profile close and relaunch — passed.
 
-The added xUnit tests cover Windows argument quoting (5 cases), control-character rejection (3), two accepted flag forms, absent/duplicate/relative arguments, old-file readiness rejection, registry restoration decisions including REG_EXPAND_SZ/absent values, preservation of concurrent external edits, unresolved ownership, and directory/registry/marker agreement: 16 test cases total.
-
-These tests do NOT activate Codex or edit real HKCU environment. They need Windows for CommandLineToArgvW. This preparation environment lacks Windows/.NET SDK, so neither compilation nor those tests were run here. The installer runs the repository's restore/build/test and rolls source back on failure. The manual acceptance checklist is in the patch README-FIRST.md.
+The automated regression tests do not edit the real HKCU environment and do not themselves launch Codex. Manual multi-instance acceptance remains important after major Codex Desktop updates.
 
 ## Provenance
 
-Inspected baseline: kuroiii/codex-multi-launcher-local at b87e4fa1e11ce5a6bd3e99ff8a61b36e9aae753a; source originally by yyyyyp233, MIT license retained. The shipped ProfileCoordinator baseline matched uploaded Git blob dadcb85aa795b321c12e47bdb0d654811eaee00e byte-for-byte.
+This branch is based on the MIT-licensed upstream project `yyyyyp233/codex-multi-launcher`. The upstream history and license attribution are retained.
 
-Primary references consulted:
-- `https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-iapplicationactivationmanager-activateapplication`
-- `https://learn.microsoft.com/en-us/windows/win32/procthread/environment-variables`
-- `https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-settingchange`
-- `https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-getpackagefullname`
-- `https://www.nuget.org/packages/System.Management/10.0.10`
-- `https://developers.openai.com/codex/environment-variables`
+Primary implementation references:
 
-Remote mutation status: branch creation returned 403 Resource not accessible by integration. No branch, commit or pull request was created by this patch preparation. The zip contains source changes and local application scripts only, not third-party application binaries, profiles or credentials.
+- <https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-iapplicationactivationmanager-activateapplication>
+- <https://learn.microsoft.com/en-us/windows/win32/procthread/environment-variables>
+- <https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-settingchange>
+- <https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-getpackagefullname>

@@ -17,7 +17,7 @@
     <Authors>yyyyyp233</Authors>
     <Description>非官方 Windows Codex App 多开与隔离工作空间启动器。</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/kuroiii/codex-multi-launcher-local</RepositoryUrl>
+    <RepositoryUrl>https://github.com/kuroiii/codex-multi-launcher</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest</AnalysisLevel>

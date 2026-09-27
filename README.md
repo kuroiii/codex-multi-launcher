@@ -42,9 +42,12 @@ Codex 多开器是一个 Windows 本机 GUI，用于明确选择：
 
 ```powershell
 git clone https://github.com/yyyyyp233/codex-multi-launcher.git
-cd codex-multi-launcher
-dotnet restore CodexMultiLauncher.slnx
+
+启动：
+cd "C:\Users\Administrator\Downloads\codex-multi-launcher-main"
+
 dotnet run --project CodexChannelLauncher.csproj -c Release
+
 ```
 
 正常主窗口的关闭按钮与 `Alt+F4` 会把多开器隐藏到系统托盘，不结束后台进程。单击托盘图标或右键选择“显示主窗口”可恢复窗口；只有托盘右键菜单中的“退出多开器”才会彻底退出。Windows 注销或关机不会被该行为拦截。
